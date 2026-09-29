@@ -40,6 +40,11 @@ ZERO = dict(Magic_amount=0.0, Rhythm=0.0, Ornaments=0.0, Bounce=0.0, Harmony=0)
 ALL_C5 = [72] * 8
 
 
+def snap():
+    return sorted((n.time, n.number, n.length, round(n.velocity, 4))
+                  for n in flp.score.notes)
+
+
 def pitches_of(notes):
     return [p for _, p, _, _ in notes]
 
@@ -121,6 +126,39 @@ class EnhanceTest(unittest.TestCase):
         self.assertEqual(mke.detect_key(src), (9, 'Natural Minor'))
         self.assertEqual(mke.detect_key(src, roots=[9])[0], 9)
         self.assertEqual(mke.detect_key(src, scales=['Major'])[1], 'Major')
+
+    def test_regenerate_gives_new_melody(self):
+        load(ALL_C5)
+        form = mke.createDialog()
+        mke.apply(form)
+        first = snap()
+        seen = {tuple(first)}
+        for _ in range(4):
+            load(ALL_C5)
+            mke.apply(form)  # same knobs again = Regenerate
+            seen.add(tuple(snap()))
+        self.assertGreaterEqual(len(seen), 4)
+
+    def test_tuning_after_regenerate_keeps_melody(self):
+        load(ALL_C5)
+        form = mke.createDialog()
+        form.values['Ornaments'] = 0.0
+        mke.apply(form)
+        load(ALL_C5)
+        mke.apply(form)  # Regenerate
+        regen = [(t, p) for t, p, _, _ in snap()]
+        load(ALL_C5)
+        form.values['Bounce'] = 1.0  # tune a knob
+        mke.apply(form)
+        self.assertEqual([(t, p) for t, p, _, _ in snap()], regen)
+
+    def test_magic_numbers_stay_reproducible(self):
+        load(); form = mke.createDialog(); form.values['Magic'] = 5
+        mke.apply(form); a = snap()
+        load(); mke.apply(form)  # Regenerate
+        load(); form.values['Magic'] = 6; mke.apply(form)
+        load(); form.values['Magic'] = 5; mke.apply(form)
+        self.assertEqual(snap(), a)
 
     def test_harmony_adds_notes(self):
         load(); plain = run(Magic=5)

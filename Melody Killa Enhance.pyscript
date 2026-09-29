@@ -11,6 +11,7 @@ Usage:
   - Write anything - even just a rhythm on one note (e.g. everything on C5).
   - Turn the "Magic" knob - every number = a new melody. Same number = same
     result, so you can always go back to one you liked.
+  - Regenerate = another new melody on the same Magic number.
   - The other knobs fine-tune the new melody without changing the magic.
   - Accept = the notes stay in the piano roll and you can keep editing them.
   - If you select only some notes, only those are changed.
@@ -138,11 +139,19 @@ def step(pitches, p, k):
 
 
 # ----------------------------------------------------------------- dialog
+KNOBS = ['Magic', 'Magic amount', 'Range', 'Rhythm', 'Ornaments', 'Bounce',
+         'Harmony', 'Key', 'Scale']
+# FL re-runs apply() with unchanged knobs only when Regenerate is pressed.
+_state = {'values': None, 'magic': None, 'regen': 0}
+
+
 def createDialog():
+    _state.update(values=None, magic=None, regen=0)  # fresh start on open
     form = flp.ScriptDialog(
         'Melody Killa Enhance',
         'Conjures new melodies from your melody. Turn the Magic knob until '
-        'you hear the one, then fine-tune it with the other knobs. '
+        'you hear the one (or press Regenerate), then fine-tune it with the '
+        'other knobs. '
         'Everything at 0 = original.')
     form.AddInputKnobInt('Magic', 1, 1, 999)
     form.AddInputKnob('Magic amount', 0.7, 0, 1)
@@ -374,8 +383,21 @@ def ornament(src, pitches, ppq, amt, rng):
 
 
 # ----------------------------------------------------------------- engine
+def regen_count(form):
+    """How many times Regenerate was pressed on the current Magic number."""
+    values = [form.GetInputValue(k) for k in KNOBS]
+    magic = values[0]
+    if magic != _state['magic']:
+        _state['regen'] = 0          # new Magic number -> its own melody
+    elif values == _state['values']:
+        _state['regen'] += 1         # nothing changed -> Regenerate
+    _state['values'], _state['magic'] = values, magic
+    return _state['regen']
+
+
 def apply(form):
-    seed = int(form.GetInputValue('Magic'))
+    # Magic 1..999 are fixed melodies, Regenerate moves past that range
+    seed = int(form.GetInputValue('Magic')) + 1000 * regen_count(form)
     strength = float(form.GetInputValue('Magic amount'))
     spread = float(form.GetInputValue('Range'))
     rhythm = float(form.GetInputValue('Rhythm'))

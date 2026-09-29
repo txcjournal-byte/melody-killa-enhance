@@ -18,6 +18,7 @@ hit **Accept** and keep editing as usual.
 | Knob | What it does |
 |---|---|
 | **Magic** | Every number = a new melody. Same number = same result, so you can always go back to one you liked. |
+| **Regenerate** (button) | Another new melody on the same Magic number – just keep pressing until you like it. |
 | **Magic amount** | How much the melody changes. Low = stays close to your melody, full = completely new. |
 | **Range** | Small steps ↔ big leaps (up to an octave). |
 | **Rhythm** | Left = long sustained notes, right = chopped into short hits, 0 = your rhythm. |
