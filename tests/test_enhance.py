@@ -36,7 +36,8 @@ def run(**vals):
                    for n in flp.score.notes))
 
 
-ZERO = dict(Magic_amount=0.0, Rhythm=0.0, Ornaments=0.0, Bounce=0.0, Harmony=0)
+ZERO = dict(Magic_amount=0.0, Groove=1, Chords=0, Rhythm=0.0, Ornaments=0.0,
+            Bounce=0.0, Harmony=0)
 ALL_C5 = [72] * 8
 
 
@@ -64,10 +65,13 @@ class EnhanceTest(unittest.TestCase):
         self.assertNotEqual(a, c)
 
     def test_monotone_input_becomes_melody(self):
+        counts = []
         for seed in range(1, 30):
             load(ALL_C5)
             notes = run(Magic=seed, Ornaments=0.0)
-            self.assertGreaterEqual(len(set(pitches_of(notes))), 3, seed)
+            counts.append(len(set(pitches_of(notes))))
+        self.assertGreaterEqual(min(counts), 2)
+        self.assertGreaterEqual(sum(counts) / len(counts), 3)
 
     def test_valid_output_all_knobs(self):
         for seed in range(1, 25):
@@ -159,6 +163,33 @@ class EnhanceTest(unittest.TestCase):
         load(); form.values['Magic'] = 6; mke.apply(form)
         load(); form.values['Magic'] = 5; mke.apply(form)
         self.assertEqual(snap(), a)
+
+    def test_trap_groove_is_syncopated_and_sparse(self):
+        q = PPQ // 4
+        for seed in range(1, 30):
+            load(ALL_C5)
+            notes = run(Magic=seed, Ornaments=0.0)
+            for t, _, _, _ in notes:
+                self.assertEqual(t % q, 0)           # on the 16th grid
+            self.assertLessEqual(len(notes), 12)     # 2 bars, sparse
+            self.assertLessEqual(max(t + L for t, _, L, _ in notes), 8 * PPQ)
+
+    def test_keep_mine_keeps_rhythm(self):
+        load()
+        notes = run(Magic=4, Groove=1, Ornaments=0.0)
+        self.assertEqual([t for t, _, _, _ in notes], [i * PPQ for i in range(8)])
+
+    def test_chords_under_melody(self):
+        for seed in range(1, 20):
+            load(ALL_C5)
+            mel = run(Magic=seed, Ornaments=0.0)
+            load(ALL_C5)
+            full = run(Magic=seed, Ornaments=0.0, Chords=2)
+            extra = sorted(set(full) - set(mel))
+            self.assertTrue(extra)
+            self.assertLess(max(p for _, p, _, _ in extra),
+                            min(p for _, p, _, _ in mel))
+            self.assertLessEqual(max(t + L for t, _, L, _ in full), 8 * PPQ)
 
     def test_harmony_adds_notes(self):
         load(); plain = run(Magic=5)

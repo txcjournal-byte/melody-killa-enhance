@@ -1,5 +1,5 @@
 """
-Melody Killa Enhance  v2.0 - melody magic
+Melody Killa Enhance  v3.0 - trap melody magic
 FL Studio piano roll script (FL Studio 21+)
 
 Install:
@@ -8,14 +8,14 @@ Install:
   Then in the piano roll: Tools (wrench) -> Scripting -> Melody Killa Enhance
 
 Usage:
-  - Write anything - even just a rhythm on one note (e.g. everything on C5).
-  - Turn the "Magic" knob - every number = a new melody. Same number = same
-    result, so you can always go back to one you liked.
-  - Regenerate = another new melody on the same Magic number.
-  - The other knobs fine-tune the new melody without changing the magic.
+  - Write anything - even just a few notes on C5.
+  - Turn the "Magic" knob or press Regenerate - every time a new trap melody.
+    Same Magic number = same result, so you can go back to one you liked.
+  - Groove "Trap" = new syncopated trap rhythm, "Keep mine" = your rhythm.
+  - Chords = adds a chord progression (+ bass) under the melody.
+  - The other knobs fine-tune the melody without changing the magic.
   - Accept = the notes stay in the piano roll and you can keep editing them.
   - If you select only some notes, only those are changed.
-  - All knobs at 0 = the original melody.
   - Made for monophonic melodies (leads) - overlapping notes get shortened.
 """
 import flpianoroll as flp
@@ -138,9 +138,29 @@ def step(pitches, p, k):
     return pitches[clamp(idx_of(pitches, p) + k, 0, len(pitches) - 1)]
 
 
+# ----------------------------------------------------------------- trap data
+GROOVES = ['Trap', 'Keep mine']
+CHORDS = ['Off', 'Chords', 'Chords + bass']
+
+# common trap chord progressions as scale degrees (0 = i, 3 = iv, 5 = VI ...)
+PROGRESSIONS = [
+    [0, 5, 2, 6], [0, 5, 6, 4], [0, 3, 5, 4], [0, 5, 3, 4], [0, 6, 5, 4],
+    [0, 2, 5, 4], [0, 3, 0, 4], [0, 5, 0, 5], [0, 1, 0, 1], [0, 4, 5, 3],
+    [5, 3, 0, 4], [0, 0, 5, 5], [0, 2, 3, 5], [0, 6, 5, 6],
+]
+# one-bar melody rhythms on the 16th grid - sparse and syncopated
+CELLS = [
+    [0, 6, 12], [0, 8, 12], [0, 6, 8, 12], [0, 4, 6, 12], [0, 3, 6, 12],
+    [0, 6, 10, 12], [0, 3, 6, 10, 12], [0, 4, 6, 8, 12], [0, 6, 8, 12, 14],
+    [0, 2, 6, 8, 12], [0, 3, 6, 8, 11, 14], [0, 2, 4, 6, 8, 12],
+]
+# phrase-ending bars - fewer, longer notes
+ENDINGS = [[0], [0, 6], [0, 4, 6], [0, 8], [0, 6, 8], [0, 3, 6]]
+
+
 # ----------------------------------------------------------------- dialog
-KNOBS = ['Magic', 'Magic amount', 'Range', 'Rhythm', 'Ornaments', 'Bounce',
-         'Harmony', 'Key', 'Scale']
+KNOBS = ['Magic', 'Magic amount', 'Groove', 'Chords', 'Range', 'Rhythm',
+         'Ornaments', 'Bounce', 'Harmony', 'Key', 'Scale']
 # FL re-runs apply() with unchanged knobs only when Regenerate is pressed.
 _state = {'values': None, 'magic': None, 'regen': 0}
 
@@ -149,39 +169,93 @@ def createDialog():
     _state.update(values=None, magic=None, regen=0)  # fresh start on open
     form = flp.ScriptDialog(
         'Melody Killa Enhance',
-        'Conjures new melodies from your melody. Turn the Magic knob until '
-        'you hear the one (or press Regenerate), then fine-tune it with the '
-        'other knobs. '
-        'Everything at 0 = original.')
+        'Turns your notes into trap melodies. Turn the Magic knob or press '
+        'Regenerate until you hear the one, then fine-tune it with the '
+        'other knobs.')
     form.AddInputKnobInt('Magic', 1, 1, 999)
     form.AddInputKnob('Magic amount', 0.7, 0, 1)
-    form.AddInputKnob('Range', 0.4, 0, 1)
+    form.AddInputCombo('Groove', ','.join(GROOVES), 0)
+    form.AddInputCombo('Chords', ','.join(CHORDS), 0)
+    form.AddInputKnob('Range', 0.5, 0, 1)
     form.AddInputKnob('Rhythm', 0, -1, 1)
-    form.AddInputKnob('Ornaments', 0.3, 0, 1)
-    form.AddInputKnob('Bounce', 0.3, 0, 1)
+    form.AddInputKnob('Ornaments', 0.15, 0, 1)
+    form.AddInputKnob('Bounce', 0.2, 0, 1)
     form.AddInputCombo('Harmony', ','.join(HARMONY), 0)
     form.AddInputCombo('Key', ','.join(KEY_NAMES), 0)
     form.AddInputCombo('Scale', ','.join(SCALE_OPTS), 0)
     return form
 
 
+# ----------------------------------------------------------------- magic: harmony
+def chord_plan(start, nbars, bar, rng):
+    """[(t0, t1, degree)] - one chord per bar, two per bar for short loops."""
+    prog = rng.pick(PROGRESSIONS)
+    per = 2 if nbars <= 2 else 1
+    size = bar // per
+    return [(start + k * size, start + (k + 1) * size, prog[k % 4])
+            for k in range(nbars * per)]
+
+
+def chord_pcs(degree, root, scale, seventh=False):
+    iv = SCALES[scale]
+    ks = (0, 2, 4, 6) if seventh else (0, 2, 4)
+    return [(root + iv[(degree + k) % 7]) % 12 for k in ks]
+
+
+def chord_at(plan, t):
+    for t0, t1, d in plan:
+        if t0 <= t < t1:
+            return d
+    return plan[-1][2] if t >= plan[-1][0] else plan[0][2]
+
+
+# ----------------------------------------------------------------- magic: groove
+def trap_groove(src, start, nbars, end_t, ppq, rng):
+    """New sparse, syncopated rhythm (2-bar phrases, last bar = ending).
+    Keeps the density and contour of your notes."""
+    bar = 4 * ppq
+    q = max(1, ppq // 4)
+    density = clamp(int(round(len(src) / float(nbars))), 2, 6)
+    fit = [c for c in CELLS if abs(len(c) - density) <= 1] or CELLS
+    a, b, end = rng.pick(fit), rng.pick(fit), rng.pick(ENDINGS)
+    if nbars == 1:
+        bars = [a]
+    elif nbars == 2:
+        bars = [a, end]
+    else:
+        bars = [[a, b, a, end][k % 4] for k in range(nbars)]
+    onsets = [start + k * bar + p * q for k, cell in enumerate(bars) for p in cell]
+    onsets = [t for t in onsets if t < end_t] or [src[0]['time']]
+    loop_end = end_t  # never past your last note
+    vel = sum(d.get('velocity', 0.8) for d in src) / float(len(src))
+
+    out = []
+    j = 0
+    for i, t in enumerate(onsets):
+        nxt = onsets[i + 1] if i + 1 < len(onsets) else loop_end
+        L = nxt - t
+        if L <= 2 * q and rng.chance(0.3):
+            L = max(1, L - q // 2)           # a little air on short notes
+        while j + 1 < len(src) and src[j + 1]['time'] <= t:
+            j += 1                           # your note under this spot
+        out.append(variant(src[0], number=src[j]['number'], time=t,
+                           length=L, velocity=vel))
+    return out
+
+
 # ----------------------------------------------------------------- magic: pitches
-def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
-    """New pitch line over the original rhythm.
-    Call / response form: odd segments (bars) start like the previous motif
-    and end differently, even segments repeat the motif from two back."""
+def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng,
+                  plan, start):
+    """New trap line over the rhythm: leaps along the chord, steps back down,
+    chord tones on strong beats. Call / response form: odd bars start like
+    the previous bar and end differently, even bars repeat two bars back."""
     n = len(src)
     top = len(pitches) - 1
     orig = [idx_of(pitches, d['number']) for d in src]
     center = int(round(sum(orig) / float(n)))
-    lim = 4 + int(round(spread * 6))           # max. scale degrees from center
+    lim = 5 + int(round(spread * 5))           # max. scale degrees from center
     lo, hi = max(0, center - lim), min(top, center + lim)
-
-    iv = SCALES[scale]
-    chord_pcs = set((root + iv[k]) % 12 for k in (0, 2, 4))
-
-    def is_chord(i):
-        return (pitches[i] - root) % 12 in chord_pcs
+    q = max(1, ppq // 4)
 
     def near(i, test):
         for off in (0, 1, -1, 2, -2, 3, -3):
@@ -190,6 +264,10 @@ def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
                 return j
         return i
 
+    def in_chord(t):
+        pcs = chord_pcs(chord_at(plan, t), root, scale, seventh=True)
+        return lambda j: pitches[j] % 12 in pcs
+
     def reflect(i):
         if i > hi:
             i = hi - (i - hi)
@@ -197,7 +275,20 @@ def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
             i = lo + (lo - i)
         return clamp(i, lo, hi)
 
-    start = src[0]['time']
+    # interval sizes in scale degrees: repeat, step, 3rd, 4th, 5th, octave
+    sizes = [0, 1, 2, 3, 4, 7]
+    weights = [0.07, 0.30 - 0.15 * spread, 0.30, 0.10,
+               0.15 + 0.05 * spread, 0.03 + 0.10 * spread]
+    wsum = sum(weights)
+
+    def pick_size():
+        r = rng.next() * wsum
+        for s, w in zip(sizes, weights):
+            r -= w
+            if r < 0:
+                return s
+        return 1
+
     total = max(d['time'] + d['length'] for d in src) - start
     bar = 4 * ppq
     seg = bar if total >= 2 * bar else max(ppq, total // 2)
@@ -208,8 +299,12 @@ def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
     gen = [0] * n
     prev = None
     for i, d in enumerate(src):
+        t = d['time']
         s = seg_of[i]
-        rel = d['time'] - start - s * seg
+        rel = t - start - s * seg
+        pos = ((t - start) // q) % 16          # 16th inside the bar
+        strong = pos % 8 == 0
+        on_beat = pos % 4 == 0
 
         # --- repeat motif from an earlier segment
         answer = s % 2 == 1
@@ -219,46 +314,51 @@ def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
             if cands:
                 k = min(cands, key=lambda k: abs(src[k]['time'] - start
                                                   - ref * seg - rel))
-                gen[i] = prev = gen[k]
+                deg = gen[k]
+                if strong and rng.chance(0.5):
+                    deg = near(deg, in_chord(t))   # fit the new chord
+                gen[i] = prev = deg
                 continue
 
-        # --- random walk on the scale
+        # --- new trap move
         if prev is None:
             deg = orig[i]
             if rng.chance(strength):
-                deg = near(clamp(center + rng.randint(-2, 2), lo, hi), is_chord)
+                deg = near(clamp(center + rng.randint(-2, 2), lo, hi), in_chord(t))
         else:
             od = orig[i] - orig[i - 1]
             # repeated note in the original (e.g. all C5) -> move more often
             p_move = strength if od != 0 else min(1.0, strength * 1.3)
             if rng.chance(p_move):
-                if od != 0 and rng.chance(0.5):
-                    dirn = 1 if od > 0 else -1      # remember original direction
+                size = pick_size()
+                if od != 0 and rng.chance(0.4):
+                    dirn = 1 if od > 0 else -1      # remember your direction
                 else:
-                    dirn = rng.pick([1, -1])
-                r = rng.next()
-                if r < 0.15 * (1 - spread):
-                    size = 0
-                elif r < 0.7 - 0.35 * spread:
-                    size = 1
-                elif r < 0.9 - 0.3 * spread:
-                    size = 2
-                else:
-                    size = rng.randint(3, 4 + int(spread * 3))
-                if rng.chance(0.12 * spread):
-                    size = 7                        # octave leap
+                    # leaps mostly up, steps mostly down
+                    dirn = 1 if rng.chance(0.62 if size >= 2 else 0.38) else -1
                 deg = reflect(prev + dirn * size)
             else:
                 deg = clamp(prev + od, 0, top)      # original interval
 
-        # strong beat -> chord tone
-        if (d['time'] - start) % ppq == 0 and rng.chance(0.6 * strength):
-            deg = near(deg, is_chord)
+        if strong and rng.chance(0.85 * strength):
+            deg = near(deg, in_chord(t))
+        elif on_beat and rng.chance(0.5 * strength):
+            deg = near(deg, in_chord(t))
+
+        # never three same notes in a row - trap lines keep moving
+        if strength > 0 and i >= 2 and deg == gen[i - 1] == gen[i - 2]:
+            fit = in_chord(t)
+            moves = [deg + m for m in (2, -2, 4, -3, 1, -1)
+                     if lo <= deg + m <= hi and deg + m != deg]
+            good = [m for m in moves if fit(m)] or moves
+            if good:
+                deg = rng.pick(good)
         gen[i] = prev = deg
 
-    # end on the tonic
+    # end the loop on the root of the last chord
     if rng.chance(0.8 * strength):
-        gen[-1] = near(gen[-1], lambda j: pitches[j] % 12 == root)
+        last_root = chord_pcs(chord_at(plan, src[-1]['time']), root, scale)[0]
+        gen[-1] = near(gen[-1], lambda j: pitches[j] % 12 == last_root)
 
     return [variant(d, number=pitches[gen[i]]) for i, d in enumerate(src)]
 
@@ -382,6 +482,37 @@ def ornament(src, pitches, ppq, amt, rng):
     return out
 
 
+# ----------------------------------------------------------------- chords
+def chord_notes(plan, root, scale, mel_low, with_bass, tmpl, rng):
+    """Chords under the melody (+ bass note an octave or two lower)."""
+    seventh = rng.chance(0.5)
+    out = []
+    for t0, t1, d in plan:
+        pcs = chord_pcs(d, root, scale, seventh)
+        # chord root placed so the voicing sits just below the melody
+        rp = mel_low - 12
+        while rp % 12 != pcs[0]:
+            rp -= 1
+        while rp < 36:
+            rp += 12
+        tones = []
+        for pc in pcs:
+            p = rp
+            while p % 12 != pc:
+                p += 1
+            tones.append(p)
+        for p in tones:
+            out.append(variant(tmpl, number=p, time=t0, length=t1 - t0,
+                               velocity=0.62, _k='chord'))
+        if with_bass:
+            b = rp - 12
+            while b > 47:
+                b -= 12
+            out.append(variant(tmpl, number=max(0, b), time=t0, length=t1 - t0,
+                               velocity=0.72, _k='chord'))
+    return out
+
+
 # ----------------------------------------------------------------- engine
 def regen_count(form):
     """How many times Regenerate was pressed on the current Magic number."""
@@ -399,6 +530,8 @@ def apply(form):
     # Magic 1..999 are fixed melodies, Regenerate moves past that range
     seed = int(form.GetInputValue('Magic')) + 1000 * regen_count(form)
     strength = float(form.GetInputValue('Magic amount'))
+    trap = int(form.GetInputValue('Groove')) == 0
+    chords = int(form.GetInputValue('Chords'))
     spread = float(form.GetInputValue('Range'))
     rhythm = float(form.GetInputValue('Rhythm'))
     orn = float(form.GetInputValue('Ornaments'))
@@ -411,10 +544,12 @@ def apply(form):
     total = score.noteCount
     if total == 0:
         return
-    if strength <= 0 and rhythm == 0 and orn <= 0 and bounce <= 0 and not harm:
-        return  # everything at 0 = original
+    if (strength <= 0 and not trap and not chords and rhythm == 0
+            and orn <= 0 and bounce <= 0 and not harm):
+        return  # everything off = original
 
     ppq = score.PPQ
+    bar = 4 * ppq
 
     # only selected notes, if any
     any_sel = False
@@ -433,11 +568,19 @@ def apply(form):
     root, scale = detect_key(src, roots, scales)
     pitches = scale_pitches(root, scale)
 
+    bar0 = src[0]['time'] - src[0]['time'] % bar
+    end = max(d['time'] + d['length'] for d in src)
+    nbars = max(1, -(-(end - bar0) // bar))
+    plan = chord_plan(bar0, nbars, bar, Rng(seed * 7 + 5))
+    plan = [(t0, min(t1, end), d) for t0, t1, d in plan if t0 < end]
+
     # each stage has its own RNG -> tuning knobs never change the magic itself
     mel = src
+    if trap:
+        mel = trap_groove(mel, bar0, nbars, end, ppq, Rng(seed * 7 + 6))
     if strength > 0:
         mel = magic_pitches(mel, pitches, root, scale, ppq, strength, spread,
-                            Rng(seed * 7 + 1))
+                            Rng(seed * 7 + 1), plan, bar0)
     if rhythm != 0:
         mel = magic_rhythm(mel, rhythm, pitches, ppq, Rng(seed * 7 + 2))
     mel = ornament(mel, pitches, ppq, orn, Rng(seed * 7 + 3))
@@ -458,9 +601,8 @@ def apply(form):
     # --- bounce (accents + humanize)
     if bounce > 0:
         rb = Rng(seed * 7 + 4)
-        start = mel[0]['time']
         for n in mel:
-            pos = (n['time'] - start) % ppq
+            pos = (n['time'] - bar0) % ppq
             v = n.get('velocity', 0.8)
             if pos == 0:
                 v *= 1 + 0.15 * bounce
@@ -470,7 +612,7 @@ def apply(form):
             n['velocity'] = clamp(v, 0.05, 1.0)
 
     # --- harmony
-    harm_notes = []
+    extra = []
     if harm:
         for n in mel:
             if n['_k'] == 'grace':
@@ -482,11 +624,17 @@ def apply(form):
                 hp = step(pitches, p, -4)
             else:
                 hp = clamp(p - 12, 0, 127)
-            harm_notes.append(variant(n, number=hp,
-                                      velocity=clamp(n.get('velocity', 0.8) * 0.75, 0.05, 1.0),
-                                      _k='harm'))
+            extra.append(variant(n, number=hp,
+                                 velocity=clamp(n.get('velocity', 0.8) * 0.75, 0.05, 1.0),
+                                 _k='harm'))
 
-    for n in mel + harm_notes:
+    # --- chords (+ bass) under the melody
+    if chords:
+        mel_low = min(n['number'] for n in mel)
+        extra += chord_notes(plan, root, scale, mel_low, chords == 2, src[0],
+                             Rng(seed * 7 + 7))
+
+    for n in mel + extra:
         n['time'] = int(max(0, n['time']))
         n['length'] = int(max(1, n['length']))
         note = make_note(n)
