@@ -30,64 +30,87 @@ def load(pitches=MELODY, length=PPQ, selected=None):
 
 def run(**vals):
     form = mke.createDialog()
-    form.values.update(vals)
+    form.values.update({k.replace('_', ' '): v for k, v in vals.items()})
     mke.apply(form)
     return sorted(((n.time, n.number, n.length, round(n.velocity, 4))
                    for n in flp.score.notes))
 
 
+ZERO = dict(Sila_kouzla=0.0, Rytmus=0.0, Ozdoby=0.0, Bounce=0.0, Harmonie=0)
+ALL_C5 = [72] * 8
+
+
+def pitches_of(notes):
+    return [p for _, p, _, _ in notes]
+
+
 class EnhanceTest(unittest.TestCase):
-    def test_zero_strength_is_original(self):
-        load()
-        before = run(Sila=0.0)
+    def test_all_zero_is_original(self):
         load()
         orig = sorted((n.time, n.number, n.length, round(n.velocity, 4))
                       for n in flp.score.notes)
-        self.assertEqual(before, orig)
+        self.assertEqual(run(**ZERO), orig)
 
-    def test_zero_strength_ignores_harmony(self):
-        load()
-        self.assertEqual(len(run(Sila=0.0, Harmonie=3)), len(MELODY))
-
-    def test_deterministic_variant(self):
-        load(); a = run(Varianta=7, Sila=1.0)
-        load(); b = run(Varianta=7, Sila=1.0)
-        load(); c = run(Varianta=8, Sila=1.0)
+    def test_deterministic(self):
+        load(); a = run(Kouzlo=7)
+        load(); b = run(Kouzlo=7)
+        load(); c = run(Kouzlo=8)
         self.assertEqual(a, b)
         self.assertNotEqual(a, c)
 
-    def test_all_styles_valid_output(self):
-        for style in range(len(mke.STYLES)):
-            for v in range(1, 40):
-                load()
-                notes = run(Styl=style, Varianta=v, Sila=1.0, Harmonie=v % 4)
-                self.assertTrue(notes)
-                for t, p, L, vel in notes:
-                    self.assertGreaterEqual(t, 0)
-                    self.assertTrue(0 <= p <= 127)
-                    self.assertGreaterEqual(L, 1)
-                    self.assertTrue(0 < vel <= 1.0)
+    def test_monotone_input_becomes_melody(self):
+        for seed in range(1, 30):
+            load(ALL_C5)
+            notes = run(Kouzlo=seed, Ozdoby=0.0)
+            self.assertGreaterEqual(len(set(pitches_of(notes))), 3, seed)
+
+    def test_valid_output_all_knobs(self):
+        for seed in range(1, 25):
+            for rh in (-1.0, -0.4, 0.0, 0.5, 1.0):
+                for pitches in (MELODY, ALL_C5):
+                    load(pitches)
+                    notes = run(Kouzlo=seed, Rytmus=rh, Rozsah=seed % 5 / 4.0,
+                                Ozdoby=1.0, Bounce=1.0, Harmonie=seed % 4)
+                    self.assertTrue(notes)
+                    for t, p, L, vel in notes:
+                        self.assertGreaterEqual(t, 0)
+                        self.assertTrue(0 <= p <= 127)
+                        self.assertGreaterEqual(L, 1)
+                        self.assertTrue(0 < vel <= 1.0)
 
     def test_melody_is_mono_without_harmony(self):
-        for v in range(1, 40):
+        for seed in range(1, 30):
             load()
-            notes = run(Varianta=v, Sila=1.0, Harmonie=0)
+            notes = run(Kouzlo=seed, Ozdoby=1.0, Rytmus=0.6)
             for (t1, _, L1, _), (t2, _, _, _) in zip(notes, notes[1:]):
                 if t2 > t1:
                     self.assertLessEqual(t1 + L1, t2)
 
-    def test_generated_notes_in_scale(self):
+    def test_notes_in_fixed_key(self):
         pcs = {(9 + i) % 12 for i in mke.SCALES['Natural Minor']}
-        for v in range(1, 30):
-            load()
-            # A + Natural Minor pevne, bez oktav (ty jen posouvaji original)
-            notes = run(Varianta=v, Sila=1.0, Tonina=10, Stupnice=1)
-            for _, p, _, _ in notes:
+        for seed in range(1, 30):
+            load(ALL_C5)
+            notes = run(Kouzlo=seed, Ozdoby=1.0, Rytmus=0.8,
+                        Tonina=10, Stupnice=1)
+            for p in pitches_of(notes):
                 self.assertIn(p % 12, pcs)
+
+    def test_rhythm_knob(self):
+        load(); base = run(Kouzlo=3, Ozdoby=0.0)
+        load(); chop = run(Kouzlo=3, Ozdoby=0.0, Rytmus=1.0)
+        load(); long_ = run(Kouzlo=3, Ozdoby=0.0, Rytmus=-1.0)
+        self.assertGreater(len(chop), len(base))
+        self.assertLess(len(long_), len(base))
+
+    def test_polish_keeps_magic(self):
+        # Bounce/Harmonie nesmi zmenit vykouzlene tony
+        load(); a = run(Kouzlo=11, Ozdoby=0.0, Bounce=0.0)
+        load(); b = run(Kouzlo=11, Ozdoby=0.0, Bounce=1.0)
+        self.assertEqual([(t, p) for t, p, _, _ in a], [(t, p) for t, p, _, _ in b])
 
     def test_only_selection_changes(self):
         load(selected={0, 1, 2})
-        run(Sila=1.0, Varianta=3, Rolly=1.0, **{'Oktavove skoky': 0.0})
+        run(Kouzlo=3, Rytmus=1.0)
         untouched = [(n.time, n.number) for n in flp.score.notes if not n.selected]
         self.assertEqual(sorted(untouched),
                          [(i * PPQ, p) for i, p in enumerate(MELODY)][3:])
@@ -96,14 +119,12 @@ class EnhanceTest(unittest.TestCase):
         load()
         src = [mke.snapshot(n) for n in flp.score.notes]
         self.assertEqual(mke.detect_key(src), (9, 'Natural Minor'))
-        # pevna tonina, auto stupnice
         self.assertEqual(mke.detect_key(src, roots=[9])[0], 9)
-        # auto tonina, pevna stupnice
         self.assertEqual(mke.detect_key(src, scales=['Major'])[1], 'Major')
 
     def test_harmony_adds_notes(self):
-        load(); plain = run(Varianta=5, Sila=1.0)
-        load(); harm = run(Varianta=5, Sila=1.0, Harmonie=3)
+        load(); plain = run(Kouzlo=5)
+        load(); harm = run(Kouzlo=5, Harmonie=3)
         self.assertGreater(len(harm), len(plain))
 
 

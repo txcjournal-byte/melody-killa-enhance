@@ -1,5 +1,5 @@
 """
-Melody Killa Enhance  v1.0
+Melody Killa Enhance  v2.0 - kouzlo na melodie
 FL Studio piano roll script (FL Studio 21+)
 
 Instalace:
@@ -8,11 +8,13 @@ Instalace:
   Pak v piano rollu: Tools (klic) -> Scripting -> Melody Killa Enhance
 
 Pouziti:
-  - Napis jednoduchou melodii. Kdyz oznacis jen cast not, upravi se jen ty.
-  - Knob "Varianta" = nova verze. Stejne cislo = stejny vysledek.
-  - "Sila" na 0 = puvodni melodie (nic se nezmeni).
-  - Tonina / Stupnice "Auto" = zjisti se z melodie. Muzes zadat jen jedno
-    z nich a druhe nechat na Auto.
+  - Napis cokoliv - klidne jen rytmus na jednom tonu (treba vse na C5).
+  - Toc knobem "Kouzlo" - kazde cislo = nova melodie. Stejne cislo = stejny
+    vysledek, takze se k oblibene muzes vratit.
+  - Ostatni knoby novou melodii doladi. Kouzlo se pri jejich zmene nezmeni.
+  - Accept = noty zustanou v piano rollu a muzes je dal editovat.
+  - Kdyz oznacis jen cast not, kouzli se jen s nimi.
+  - Vsechny knoby na 0 = puvodni melodie.
   - Urceno pro jednohlasou melodii (lead) - prekryvajici se noty se zkrati.
 """
 import flpianoroll as flp
@@ -28,15 +30,7 @@ SCALES = {
 SCALE_NAMES = list(SCALES.keys())
 SCALE_OPTS = ['Auto'] + SCALE_NAMES
 KEY_NAMES = ['Auto', 'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-STYLES = ['Trap Bounce', 'Dark', 'Crazy']
 HARMONY = ['Vypnuto', 'Tercie nad', 'Kvinta pod', 'Oktava pod']
-
-# styl: (triol, roll, grace, oktava, delka rollu /PPQ, smer oktavy, smer grace)
-STYLE_CFG = {
-    0: dict(trip=1.0, roll=1.0, grace=1.0, octv=1.0, roll_div=4, oct_dir=12, grace_dir=1),
-    1: dict(trip=0.7, roll=0.6, grace=1.2, octv=0.8, roll_div=4, oct_dir=-12, grace_dir=-1),
-    2: dict(trip=1.6, roll=1.6, grace=1.5, octv=1.6, roll_div=8, oct_dir=0, grace_dir=0),
-}
 
 PROPS = ['number', 'time', 'length', 'velocity', 'pan', 'release', 'color',
          'fcut', 'fres', 'pitchofs', 'slide', 'porta', 'muted', 'group']
@@ -44,7 +38,7 @@ PROPS = ['number', 'time', 'length', 'velocity', 'pan', 'release', 'color',
 
 # ----------------------------------------------------------------- utils
 class Rng:
-    """Deterministicky xorshift - stejna Varianta = stejny vysledek."""
+    """Deterministicky xorshift - stejne Kouzlo = stejny vysledek."""
     def __init__(self, seed):
         self.s = (seed * 2654435761 + 12345) & 0xFFFFFFFF or 1
 
@@ -147,42 +141,257 @@ def step(pitches, p, k):
 def createDialog():
     form = flp.ScriptDialog(
         'Melody Killa Enhance',
-        'Udela z obycejne melodie trapovou strelu. '
-        'Knob Varianta = nova verze. Sila 0 = original.')
-    form.AddInputCombo('Styl', ','.join(STYLES), 0)
-    form.AddInputKnob('Sila', 0.6, 0, 1)
-    form.AddInputKnobInt('Varianta', 1, 1, 999)
+        'Kouzli nove melodie z tve melodie. Toc knobem Kouzlo, dokud '
+        'neuslysis tu pravou, ostatnimi knoby ji dolad. '
+        'Vsechno na 0 = original.')
+    form.AddInputKnobInt('Kouzlo', 1, 1, 999)
+    form.AddInputKnob('Sila kouzla', 0.7, 0, 1)
+    form.AddInputKnob('Rozsah', 0.4, 0, 1)
+    form.AddInputKnob('Rytmus', 0, -1, 1)
+    form.AddInputKnob('Ozdoby', 0.3, 0, 1)
+    form.AddInputKnob('Bounce', 0.3, 0, 1)
+    form.AddInputCombo('Harmonie', ','.join(HARMONY), 0)
     form.AddInputCombo('Tonina', ','.join(KEY_NAMES), 0)
     form.AddInputCombo('Stupnice', ','.join(SCALE_OPTS), 0)
-    form.AddInputKnob('Triolove behy', 0.5, 0, 1)
-    form.AddInputKnob('Rolly', 0.4, 0, 1)
-    form.AddInputKnob('Grace noty', 0.4, 0, 1)
-    form.AddInputKnob('Oktavove skoky', 0.3, 0, 1)
-    form.AddInputCheckbox('Call & Response', 1)
-    form.AddInputCombo('Harmonie', ','.join(HARMONY), 0)
-    form.AddInputKnob('Bounce', 0.5, 0, 1)
     return form
+
+
+# ----------------------------------------------------------------- kouzlo: tony
+def magic_pitches(src, pitches, root, scale, ppq, strength, spread, rng):
+    """Novy tonovy prubeh na puvodnim rytmu.
+    Stavba otazka / odpoved: lichy usek (takt) zacne jako predchozi motiv
+    a skonci jinak, sudy usek opakuje motiv o dva useky zpet."""
+    n = len(src)
+    top = len(pitches) - 1
+    orig = [idx_of(pitches, d['number']) for d in src]
+    center = int(round(sum(orig) / float(n)))
+    lim = 4 + int(round(spread * 6))           # max. stupnu od stredu
+    lo, hi = max(0, center - lim), min(top, center + lim)
+
+    iv = SCALES[scale]
+    chord_pcs = set((root + iv[k]) % 12 for k in (0, 2, 4))
+
+    def is_chord(i):
+        return (pitches[i] - root) % 12 in chord_pcs
+
+    def near(i, test):
+        for off in (0, 1, -1, 2, -2, 3, -3):
+            j = i + off
+            if lo <= j <= hi and test(j):
+                return j
+        return i
+
+    def reflect(i):
+        if i > hi:
+            i = hi - (i - hi)
+        if i < lo:
+            i = lo + (lo - i)
+        return clamp(i, lo, hi)
+
+    start = src[0]['time']
+    total = max(d['time'] + d['length'] for d in src) - start
+    bar = 4 * ppq
+    seg = bar if total >= 2 * bar else max(ppq, total // 2)
+    seg_of = [(d['time'] - start) // seg for d in src]
+    nseg = seg_of[-1] + 1
+    repeat = [s >= 1 and rng.chance(0.85 * strength) for s in range(nseg)]
+
+    gen = [0] * n
+    prev = None
+    for i, d in enumerate(src):
+        s = seg_of[i]
+        rel = d['time'] - start - s * seg
+
+        # --- opakovani motivu z drivejsiho useku
+        answer = s % 2 == 1
+        if repeat[s] and not (answer and rel >= seg // 2):
+            ref = s - 1 if s == 1 else s - 2
+            cands = [k for k in range(i) if seg_of[k] == ref]
+            if cands:
+                k = min(cands, key=lambda k: abs(src[k]['time'] - start
+                                                  - ref * seg - rel))
+                gen[i] = prev = gen[k]
+                continue
+
+        # --- nahodna prochazka po stupnici
+        if prev is None:
+            deg = orig[i]
+            if rng.chance(strength):
+                deg = near(clamp(center + rng.randint(-2, 2), lo, hi), is_chord)
+        else:
+            od = orig[i] - orig[i - 1]
+            # opakovany ton v originalu (treba vse na C5) -> hybat se casteji
+            p_move = strength if od != 0 else min(1.0, strength * 1.3)
+            if rng.chance(p_move):
+                if od != 0 and rng.chance(0.5):
+                    dirn = 1 if od > 0 else -1      # pamet puvodniho smeru
+                else:
+                    dirn = rng.pick([1, -1])
+                r = rng.next()
+                if r < 0.15 * (1 - spread):
+                    size = 0
+                elif r < 0.7 - 0.35 * spread:
+                    size = 1
+                elif r < 0.9 - 0.3 * spread:
+                    size = 2
+                else:
+                    size = rng.randint(3, 4 + int(spread * 3))
+                if rng.chance(0.12 * spread):
+                    size = 7                        # oktavovy skok
+                deg = reflect(prev + dirn * size)
+            else:
+                deg = clamp(prev + od, 0, top)      # puvodni interval
+
+        # silna doba -> tonu akordu
+        if (d['time'] - start) % ppq == 0 and rng.chance(0.6 * strength):
+            deg = near(deg, is_chord)
+        gen[i] = prev = deg
+
+    # konec na tonice
+    if rng.chance(0.8 * strength):
+        gen[-1] = near(gen[-1], lambda j: pitches[j] % 12 == root)
+
+    return [variant(d, number=pitches[gen[i]]) for i, d in enumerate(src)]
+
+
+# ----------------------------------------------------------------- kouzlo: rytmus
+def magic_rhythm(src, amount, pitches, ppq, rng):
+    """amount > 0: rozseka noty na kosticky, amount < 0: dlouhe znejici tony."""
+    out = []
+    if amount > 0:
+        for d in src:
+            L, t = d['length'], d['time']
+            if L >= ppq // 2 and rng.chance(amount):
+                piece = ppq // 4 if (L < ppq or rng.chance(amount)) else ppq // 2
+                piece = max(1, piece)
+                count = min(8, L // piece)
+                for j in range(count):
+                    p = d['number']
+                    if j > 0 and rng.chance(0.35):
+                        p = step(pitches, p, rng.pick([1, -1, 2, -2]))
+                    ln = piece if j < count - 1 else L - j * piece
+                    out.append(variant(d, number=p, time=t + j * piece, length=ln))
+            else:
+                out.append(dict(d))
+    else:
+        a = -amount
+        i = 0
+        while i < len(src):
+            d = dict(src[i])
+            j = i + 1
+            while (j < len(src) and d['length'] < 4 * ppq
+                   and rng.chance(a * 0.7)):
+                nx = src[j]
+                d['length'] = max(d['length'], nx['time'] + nx['length'] - d['time'])
+                j += 1
+            out.append(d)
+            i = j
+        # legato - vyplnit mezery do dalsi noty
+        for k in range(len(out) - 1):
+            gap_end = out[k + 1]['time']
+            if gap_end > out[k]['time'] + out[k]['length'] and rng.chance(a):
+                out[k]['length'] = gap_end - out[k]['time']
+    return out
+
+
+# ----------------------------------------------------------------- ozdoby
+def ornament(src, pitches, ppq, amt, rng):
+    """Triolove behy, rolly a grace noty. Druha pulka (odpoved) vic."""
+    p_trip = clamp(amt * 0.5, 0.0, 0.95)
+    p_roll = clamp(amt * 0.4, 0.0, 0.95)
+    p_grace = clamp(amt * 0.4, 0.0, 0.95)
+
+    start = min(d['time'] for d in src)
+    end = max(d['time'] + d['length'] for d in src)
+    half = start + (end - start) // 2
+
+    prev_run = False
+    out = []  # kazda nota ma '_k': main / run / roll / grace
+    for k, d in enumerate(src):
+        nxt = None
+        for j in range(k + 1, len(src)):
+            if src[j]['time'] > d['time']:
+                nxt = src[j]
+                break
+
+        boost = 1.4 if d['time'] >= half else 1.0
+        pitch = d['number']
+        vel = d.get('velocity', 0.8)
+        t, L = d['time'], d['length']
+
+        tl = max(1, ppq // 6)     # 1/16 triola
+        rstep = max(1, ppq // 4)  # 1/16
+        done = False
+
+        if amt > 0 and nxt is not None and L >= ppq // 2 and rng.chance(p_trip * boost):
+            run_len = 3 * tl
+            main_len = L - run_len
+            if main_len >= ppq // 8:
+                out.append(variant(d, length=main_len, _k='main'))
+            ti = idx_of(pitches, nxt['number'])
+            ci = idx_of(pitches, pitch)
+            dirn = 1 if ti > ci else -1 if ti < ci else rng.pick([1, -1])
+            for j in range(3):
+                pi = clamp(ti - dirn * (3 - j), 0, len(pitches) - 1)
+                out.append(variant(d,
+                                   number=pitches[pi],
+                                   time=t + L - run_len + j * tl,
+                                   length=tl,
+                                   velocity=clamp(vel * (0.6 + 0.1 * j), 0.05, 1.0),
+                                   _k='run'))
+            done = True
+
+        elif amt > 0 and L >= ppq // 2 and rng.chance(p_roll * boost):
+            count = rng.randint(2, 4)
+            while count > 1 and L - count * rstep < rstep:
+                count -= 1
+            if count >= 2:
+                for j in range(count):
+                    out.append(variant(d,
+                                       time=t + j * rstep,
+                                       length=max(1, int(rstep * 0.9)),
+                                       velocity=clamp(vel * (0.5 + 0.5 * j / count), 0.05, 1.0),
+                                       _k='roll'))
+                out.append(variant(d, time=t + count * rstep,
+                                   length=L - count * rstep, _k='main'))
+                done = True
+
+        if not done:
+            out.append(variant(d, _k='main'))
+        ends_in_run = done and out[-1]['_k'] == 'run'
+
+        # grace nota pred notou (ne kdyz do ni uz vede beh z predchozi)
+        gl = max(1, ppq // 8)  # 1/32
+        if amt > 0 and t - gl >= 0 and not prev_run and rng.chance(p_grace * boost):
+            out.append(variant(d,
+                               number=step(pitches, pitch, rng.pick([1, -1])),
+                               time=t - gl,
+                               length=gl,
+                               velocity=clamp(vel * 0.55, 0.05, 1.0),
+                               _k='grace'))
+        prev_run = ends_in_run
+    return out
 
 
 # ----------------------------------------------------------------- engine
 def apply(form):
-    style = int(form.GetInputValue('Styl'))
-    amt = float(form.GetInputValue('Sila'))
-    rng = Rng(int(form.GetInputValue('Varianta')))
+    seed = int(form.GetInputValue('Kouzlo'))
+    strength = float(form.GetInputValue('Sila kouzla'))
+    spread = float(form.GetInputValue('Rozsah'))
+    rhythm = float(form.GetInputValue('Rytmus'))
+    orn = float(form.GetInputValue('Ozdoby'))
+    bounce = float(form.GetInputValue('Bounce'))
+    harm = int(form.GetInputValue('Harmonie'))
     key_i = int(form.GetInputValue('Tonina'))
     scale_i = int(form.GetInputValue('Stupnice'))
-    k_trip = float(form.GetInputValue('Triolove behy'))
-    k_roll = float(form.GetInputValue('Rolly'))
-    k_grace = float(form.GetInputValue('Grace noty'))
-    k_oct = float(form.GetInputValue('Oktavove skoky'))
-    call_resp = bool(form.GetInputValue('Call & Response'))
-    harm = int(form.GetInputValue('Harmonie'))
-    bounce = float(form.GetInputValue('Bounce')) * amt
 
     score = flp.score
     total = score.noteCount
-    if total == 0 or amt <= 0:
+    if total == 0:
         return
+    if strength <= 0 and rhythm == 0 and orn <= 0 and bounce <= 0 and not harm:
+        return  # vsechno na 0 = original
+
     ppq = score.PPQ
 
     # jen oznacene noty, pokud nejake jsou
@@ -197,111 +406,21 @@ def apply(form):
         score.deleteNote(i)
     src.sort(key=lambda d: (d['time'], d['number']))
 
-    # tonina
     roots = None if key_i == 0 else [key_i - 1]
     scales = None if scale_i == 0 else [SCALE_NAMES[scale_i - 1]]
     root, scale = detect_key(src, roots, scales)
     pitches = scale_pitches(root, scale)
 
-    cfg = STYLE_CFG.get(style, STYLE_CFG[0])
-
-    def prob(knob, mult):
-        return clamp(knob * amt * mult, 0.0, 0.95)
-
-    p_trip = prob(k_trip, cfg['trip'])
-    p_roll = prob(k_roll, cfg['roll'])
-    p_grace = prob(k_grace, cfg['grace'])
-    p_oct = prob(k_oct, cfg['octv'])
-
-    start = min(d['time'] for d in src)
-    end = max(d['time'] + d['length'] for d in src)
-    half = start + (end - start) // 2
-    last_i = len(src) - 1
-
-    prev_run = False
-    out = []  # kazda nota ma '_k': main / run / roll / grace / harm
-
-    for k, d in enumerate(src):
-        # dalsi nota s pozdejsim casem
-        nxt = None
-        for j in range(k + 1, len(src)):
-            if src[j]['time'] > d['time']:
-                nxt = src[j]
-                break
-
-        second = call_resp and d['time'] >= half
-        boost = 1.4 if second else 1.0
-        pitch = d['number']
-        vel = d.get('velocity', 0.8)
-        t, L = d['time'], d['length']
-
-        # --- oktavove skoky (hlavne v odpovedi)
-        if rng.chance(p_oct * (1.5 if second else 0.5)):
-            od = cfg['oct_dir'] or rng.pick([12, -12])
-            pitch = clamp(pitch + od, 0, 127)
-
-        # --- call & response: jiny konec odpovedi
-        if second and k == last_i and rng.chance(amt):
-            pitch = step(pitches, pitch, rng.pick([2, -2, 4, -3]))
-
-        # --- rytmus: triolovy beh NEBO roll
-        tl = max(1, ppq // 6)           # 1/16 triola
-        rstep = max(1, ppq // cfg['roll_div'])  # 1/16 nebo 1/32
-        done = False
-
-        if nxt is not None and L >= ppq // 2 and rng.chance(p_trip * boost):
-            run_len = 3 * tl
-            main_len = L - run_len
-            if main_len >= ppq // 8:
-                out.append(variant(d, number=pitch, length=main_len, _k='main'))
-            target = nxt['number']
-            ti = idx_of(pitches, target)
-            ci = idx_of(pitches, pitch)
-            dirn = 1 if ti > ci else -1 if ti < ci else rng.pick([1, -1])
-            for j in range(3):
-                pi = clamp(ti - dirn * (3 - j), 0, len(pitches) - 1)
-                out.append(variant(d,
-                                   number=pitches[pi],
-                                   time=t + L - run_len + j * tl,
-                                   length=tl,
-                                   velocity=clamp(vel * (0.6 + 0.1 * j), 0.05, 1.0),
-                                   _k='run'))
-            done = True
-
-        elif L >= ppq // 2 and rng.chance(p_roll * boost):
-            count = rng.randint(2, 4 if style != 2 else 6)
-            while count > 1 and L - count * rstep < rstep:
-                count -= 1
-            if count >= 2:
-                for j in range(count):
-                    out.append(variant(d,
-                                       number=pitch,
-                                       time=t + j * rstep,
-                                       length=max(1, int(rstep * 0.9)),
-                                       velocity=clamp(vel * (0.5 + 0.5 * j / count), 0.05, 1.0),
-                                       _k='roll'))
-                out.append(variant(d, number=pitch, time=t + count * rstep,
-                                   length=L - count * rstep, _k='main'))
-                done = True
-
-        if not done:
-            out.append(variant(d, number=pitch, _k='main'))
-        ends_in_run = done and out[-1]['_k'] == 'run'
-
-        # --- grace nota pred notou (ne kdyz do ni uz vede beh z predchozi)
-        gl = max(1, ppq // 8)  # 1/32
-        if t - gl >= 0 and not prev_run and rng.chance(p_grace * boost):
-            gd = cfg['grace_dir'] or rng.pick([1, -1])
-            out.append(variant(d,
-                               number=step(pitches, pitch, gd),
-                               time=t - gl,
-                               length=gl,
-                               velocity=clamp(vel * 0.55, 0.05, 1.0),
-                               _k='grace'))
-        prev_run = ends_in_run
+    # kazdy krok ma vlastni nahodu -> ladeni knobu nemeni samotne kouzlo
+    mel = src
+    if strength > 0:
+        mel = magic_pitches(mel, pitches, root, scale, ppq, strength, spread,
+                            Rng(seed * 7 + 1))
+    if rhythm != 0:
+        mel = magic_rhythm(mel, rhythm, pitches, ppq, Rng(seed * 7 + 2))
+    mel = ornament(mel, pitches, ppq, orn, Rng(seed * 7 + 3))
 
     # --- melodie: bez prekryvu (mono lead)
-    mel = [n for n in out if n['_k'] != 'harm']
     mel.sort(key=lambda n: (n['time'], n['number']))
     for i in range(len(mel) - 1):
         a = mel[i]
@@ -316,6 +435,8 @@ def apply(form):
 
     # --- bounce (akcenty + humanizace)
     if bounce > 0:
+        rb = Rng(seed * 7 + 4)
+        start = mel[0]['time']
         for n in mel:
             pos = (n['time'] - start) % ppq
             v = n.get('velocity', 0.8)
@@ -323,14 +444,14 @@ def apply(form):
                 v *= 1 + 0.15 * bounce
             elif pos != ppq // 2:
                 v *= 1 - 0.25 * bounce
-            v *= 1 + (rng.next() - 0.5) * 0.1 * bounce
+            v *= 1 + (rb.next() - 0.5) * 0.1 * bounce
             n['velocity'] = clamp(v, 0.05, 1.0)
 
     # --- harmonie
     harm_notes = []
     if harm:
         for n in mel:
-            if n['_k'] in ('grace',):
+            if n['_k'] == 'grace':
                 continue
             p = n['number']
             if harm == 1:
