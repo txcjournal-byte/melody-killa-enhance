@@ -1,4 +1,4 @@
-"""Minimalni mock FL Studio modulu flpianoroll - jen pro testy mimo FL."""
+"""Minimal mock of the FL Studio flpianoroll module - for tests outside FL."""
 
 
 class Note:
