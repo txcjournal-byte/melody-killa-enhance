@@ -1,0 +1,352 @@
+"""
+Melody Killa Enhance  v1.0
+FL Studio piano roll script (FL Studio 21+)
+
+Instalace:
+  Soubor zkopiruj do:
+  Dokumenty\\Image-Line\\FL Studio\\Settings\\Piano roll scripts\\
+  Pak v piano rollu: Tools (klic) -> Scripting -> Melody Killa Enhance
+
+Pouziti:
+  - Napis jednoduchou melodii. Kdyz oznacis jen cast not, upravi se jen ty.
+  - Knob "Varianta" = nova verze. Stejne cislo = stejny vysledek.
+  - "Sila" na 0 = puvodni melodie (nic se nezmeni).
+  - Tonina / Stupnice "Auto" = zjisti se z melodie. Muzes zadat jen jedno
+    z nich a druhe nechat na Auto.
+  - Urceno pro jednohlasou melodii (lead) - prekryvajici se noty se zkrati.
+"""
+import flpianoroll as flp
+
+# ----------------------------------------------------------------- data
+SCALES = {
+    'Natural Minor':  [0, 2, 3, 5, 7, 8, 10],
+    'Harmonic Minor': [0, 2, 3, 5, 7, 8, 11],
+    'Phrygian':       [0, 1, 3, 5, 7, 8, 10],
+    'Dorian':         [0, 2, 3, 5, 7, 9, 10],
+    'Major':          [0, 2, 4, 5, 7, 9, 11],
+}
+SCALE_NAMES = list(SCALES.keys())
+SCALE_OPTS = ['Auto'] + SCALE_NAMES
+KEY_NAMES = ['Auto', 'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+STYLES = ['Trap Bounce', 'Dark', 'Crazy']
+HARMONY = ['Vypnuto', 'Tercie nad', 'Kvinta pod', 'Oktava pod']
+
+# styl: (triol, roll, grace, oktava, delka rollu /PPQ, smer oktavy, smer grace)
+STYLE_CFG = {
+    0: dict(trip=1.0, roll=1.0, grace=1.0, octv=1.0, roll_div=4, oct_dir=12, grace_dir=1),
+    1: dict(trip=0.7, roll=0.6, grace=1.2, octv=0.8, roll_div=4, oct_dir=-12, grace_dir=-1),
+    2: dict(trip=1.6, roll=1.6, grace=1.5, octv=1.6, roll_div=8, oct_dir=0, grace_dir=0),
+}
+
+PROPS = ['number', 'time', 'length', 'velocity', 'pan', 'release', 'color',
+         'fcut', 'fres', 'pitchofs', 'slide', 'porta', 'muted', 'group']
+
+
+# ----------------------------------------------------------------- utils
+class Rng:
+    """Deterministicky xorshift - stejna Varianta = stejny vysledek."""
+    def __init__(self, seed):
+        self.s = (seed * 2654435761 + 12345) & 0xFFFFFFFF or 1
+
+    def next(self):
+        x = self.s
+        x ^= (x << 13) & 0xFFFFFFFF
+        x ^= x >> 17
+        x ^= (x << 5) & 0xFFFFFFFF
+        self.s = x & 0xFFFFFFFF
+        return self.s / 4294967296.0
+
+    def chance(self, p):
+        return self.next() < p
+
+    def pick(self, seq):
+        return seq[int(self.next() * len(seq)) % len(seq)]
+
+    def randint(self, a, b):
+        return a + int(self.next() * (b - a + 1)) % (b - a + 1)
+
+
+def clamp(v, lo, hi):
+    return lo if v < lo else hi if v > hi else v
+
+
+def snapshot(n):
+    d = {}
+    for p in PROPS:
+        try:
+            d[p] = getattr(n, p)
+        except Exception:
+            pass
+    return d
+
+
+def make_note(d):
+    n = flp.Note()
+    for p in PROPS:
+        if p in d:
+            try:
+                setattr(n, p, d[p])
+            except Exception:
+                pass
+    return n
+
+
+def variant(d, **kw):
+    x = dict(d)
+    x.update(kw)
+    return x
+
+
+def detect_key(notes, roots=None, scales=None):
+    """Najde toninu + stupnici, do ktere noty nejlip sedi (vazeno delkou).
+    roots / scales omezi hledani (napr. pevna tonina, auto stupnice)."""
+    roots = list(range(12)) if roots is None else roots
+    scales = SCALE_NAMES if scales is None else scales
+    best, best_root, best_scale = None, roots[0], scales[0]
+    first_pc = notes[0]['number'] % 12
+    last_pc = notes[-1]['number'] % 12
+    avg = sum(max(1, n['length']) for n in notes) / float(len(notes))
+    for name in scales:
+        for root in roots:
+            pcs = set((root + i) % 12 for i in SCALES[name])
+            score = 0
+            for n in notes:
+                pc = n['number'] % 12
+                w = max(1, n['length'])
+                score += w if pc in pcs else -2 * w
+                if pc == root:
+                    score += avg * 0.5
+            if first_pc == root:
+                score += avg * 2
+            if last_pc == root:
+                score += avg
+            if best is None or score > best:
+                best, best_root, best_scale = score, root, name
+    return best_root, best_scale
+
+
+def scale_pitches(root, scale):
+    iv = set(SCALES[scale])
+    return [p for p in range(128) if (p - root) % 12 in iv]
+
+
+def idx_of(pitches, p):
+    bi, bd = 0, 999
+    for i, q in enumerate(pitches):
+        d = abs(q - p)
+        if d < bd:
+            bi, bd = i, d
+    return bi
+
+
+def step(pitches, p, k):
+    return pitches[clamp(idx_of(pitches, p) + k, 0, len(pitches) - 1)]
+
+
+# ----------------------------------------------------------------- dialog
+def createDialog():
+    form = flp.ScriptDialog(
+        'Melody Killa Enhance',
+        'Udela z obycejne melodie trapovou strelu. '
+        'Knob Varianta = nova verze. Sila 0 = original.')
+    form.AddInputCombo('Styl', ','.join(STYLES), 0)
+    form.AddInputKnob('Sila', 0.6, 0, 1)
+    form.AddInputKnobInt('Varianta', 1, 1, 999)
+    form.AddInputCombo('Tonina', ','.join(KEY_NAMES), 0)
+    form.AddInputCombo('Stupnice', ','.join(SCALE_OPTS), 0)
+    form.AddInputKnob('Triolove behy', 0.5, 0, 1)
+    form.AddInputKnob('Rolly', 0.4, 0, 1)
+    form.AddInputKnob('Grace noty', 0.4, 0, 1)
+    form.AddInputKnob('Oktavove skoky', 0.3, 0, 1)
+    form.AddInputCheckbox('Call & Response', 1)
+    form.AddInputCombo('Harmonie', ','.join(HARMONY), 0)
+    form.AddInputKnob('Bounce', 0.5, 0, 1)
+    return form
+
+
+# ----------------------------------------------------------------- engine
+def apply(form):
+    style = int(form.GetInputValue('Styl'))
+    amt = float(form.GetInputValue('Sila'))
+    rng = Rng(int(form.GetInputValue('Varianta')))
+    key_i = int(form.GetInputValue('Tonina'))
+    scale_i = int(form.GetInputValue('Stupnice'))
+    k_trip = float(form.GetInputValue('Triolove behy'))
+    k_roll = float(form.GetInputValue('Rolly'))
+    k_grace = float(form.GetInputValue('Grace noty'))
+    k_oct = float(form.GetInputValue('Oktavove skoky'))
+    call_resp = bool(form.GetInputValue('Call & Response'))
+    harm = int(form.GetInputValue('Harmonie'))
+    bounce = float(form.GetInputValue('Bounce')) * amt
+
+    score = flp.score
+    total = score.noteCount
+    if total == 0 or amt <= 0:
+        return
+    ppq = score.PPQ
+
+    # jen oznacene noty, pokud nejake jsou
+    any_sel = False
+    for i in range(total):
+        if score.getNote(i).selected:
+            any_sel = True
+            break
+    idxs = [i for i in range(total) if not any_sel or score.getNote(i).selected]
+    src = [snapshot(score.getNote(i)) for i in idxs]
+    for i in sorted(idxs, reverse=True):
+        score.deleteNote(i)
+    src.sort(key=lambda d: (d['time'], d['number']))
+
+    # tonina
+    roots = None if key_i == 0 else [key_i - 1]
+    scales = None if scale_i == 0 else [SCALE_NAMES[scale_i - 1]]
+    root, scale = detect_key(src, roots, scales)
+    pitches = scale_pitches(root, scale)
+
+    cfg = STYLE_CFG.get(style, STYLE_CFG[0])
+
+    def prob(knob, mult):
+        return clamp(knob * amt * mult, 0.0, 0.95)
+
+    p_trip = prob(k_trip, cfg['trip'])
+    p_roll = prob(k_roll, cfg['roll'])
+    p_grace = prob(k_grace, cfg['grace'])
+    p_oct = prob(k_oct, cfg['octv'])
+
+    start = min(d['time'] for d in src)
+    end = max(d['time'] + d['length'] for d in src)
+    half = start + (end - start) // 2
+    last_i = len(src) - 1
+
+    prev_run = False
+    out = []  # kazda nota ma '_k': main / run / roll / grace / harm
+
+    for k, d in enumerate(src):
+        # dalsi nota s pozdejsim casem
+        nxt = None
+        for j in range(k + 1, len(src)):
+            if src[j]['time'] > d['time']:
+                nxt = src[j]
+                break
+
+        second = call_resp and d['time'] >= half
+        boost = 1.4 if second else 1.0
+        pitch = d['number']
+        vel = d.get('velocity', 0.8)
+        t, L = d['time'], d['length']
+
+        # --- oktavove skoky (hlavne v odpovedi)
+        if rng.chance(p_oct * (1.5 if second else 0.5)):
+            od = cfg['oct_dir'] or rng.pick([12, -12])
+            pitch = clamp(pitch + od, 0, 127)
+
+        # --- call & response: jiny konec odpovedi
+        if second and k == last_i and rng.chance(amt):
+            pitch = step(pitches, pitch, rng.pick([2, -2, 4, -3]))
+
+        # --- rytmus: triolovy beh NEBO roll
+        tl = max(1, ppq // 6)           # 1/16 triola
+        rstep = max(1, ppq // cfg['roll_div'])  # 1/16 nebo 1/32
+        done = False
+
+        if nxt is not None and L >= ppq // 2 and rng.chance(p_trip * boost):
+            run_len = 3 * tl
+            main_len = L - run_len
+            if main_len >= ppq // 8:
+                out.append(variant(d, number=pitch, length=main_len, _k='main'))
+            target = nxt['number']
+            ti = idx_of(pitches, target)
+            ci = idx_of(pitches, pitch)
+            dirn = 1 if ti > ci else -1 if ti < ci else rng.pick([1, -1])
+            for j in range(3):
+                pi = clamp(ti - dirn * (3 - j), 0, len(pitches) - 1)
+                out.append(variant(d,
+                                   number=pitches[pi],
+                                   time=t + L - run_len + j * tl,
+                                   length=tl,
+                                   velocity=clamp(vel * (0.6 + 0.1 * j), 0.05, 1.0),
+                                   _k='run'))
+            done = True
+
+        elif L >= ppq // 2 and rng.chance(p_roll * boost):
+            count = rng.randint(2, 4 if style != 2 else 6)
+            while count > 1 and L - count * rstep < rstep:
+                count -= 1
+            if count >= 2:
+                for j in range(count):
+                    out.append(variant(d,
+                                       number=pitch,
+                                       time=t + j * rstep,
+                                       length=max(1, int(rstep * 0.9)),
+                                       velocity=clamp(vel * (0.5 + 0.5 * j / count), 0.05, 1.0),
+                                       _k='roll'))
+                out.append(variant(d, number=pitch, time=t + count * rstep,
+                                   length=L - count * rstep, _k='main'))
+                done = True
+
+        if not done:
+            out.append(variant(d, number=pitch, _k='main'))
+        ends_in_run = done and out[-1]['_k'] == 'run'
+
+        # --- grace nota pred notou (ne kdyz do ni uz vede beh z predchozi)
+        gl = max(1, ppq // 8)  # 1/32
+        if t - gl >= 0 and not prev_run and rng.chance(p_grace * boost):
+            gd = cfg['grace_dir'] or rng.pick([1, -1])
+            out.append(variant(d,
+                               number=step(pitches, pitch, gd),
+                               time=t - gl,
+                               length=gl,
+                               velocity=clamp(vel * 0.55, 0.05, 1.0),
+                               _k='grace'))
+        prev_run = ends_in_run
+
+    # --- melodie: bez prekryvu (mono lead)
+    mel = [n for n in out if n['_k'] != 'harm']
+    mel.sort(key=lambda n: (n['time'], n['number']))
+    for i in range(len(mel) - 1):
+        a = mel[i]
+        for j in range(i + 1, len(mel)):
+            b = mel[j]
+            if b['time'] > a['time']:
+                if a['time'] + a['length'] > b['time']:
+                    a['length'] = max(1, b['time'] - a['time'])
+                break
+    min_len = max(1, ppq // 16)
+    mel = [n for n in mel if n['length'] >= min_len or n['_k'] == 'main']
+
+    # --- bounce (akcenty + humanizace)
+    if bounce > 0:
+        for n in mel:
+            pos = (n['time'] - start) % ppq
+            v = n.get('velocity', 0.8)
+            if pos == 0:
+                v *= 1 + 0.15 * bounce
+            elif pos != ppq // 2:
+                v *= 1 - 0.25 * bounce
+            v *= 1 + (rng.next() - 0.5) * 0.1 * bounce
+            n['velocity'] = clamp(v, 0.05, 1.0)
+
+    # --- harmonie
+    harm_notes = []
+    if harm:
+        for n in mel:
+            if n['_k'] in ('grace',):
+                continue
+            p = n['number']
+            if harm == 1:
+                hp = step(pitches, p, 2)
+            elif harm == 2:
+                hp = step(pitches, p, -4)
+            else:
+                hp = clamp(p - 12, 0, 127)
+            harm_notes.append(variant(n, number=hp,
+                                      velocity=clamp(n.get('velocity', 0.8) * 0.75, 0.05, 1.0),
+                                      _k='harm'))
+
+    for n in mel + harm_notes:
+        n['time'] = int(max(0, n['time']))
+        n['length'] = int(max(1, n['length']))
+        note = make_note(n)
+        if any_sel:
+            note.selected = True  # vysledek zustane oznaceny
+        score.addNote(note)
